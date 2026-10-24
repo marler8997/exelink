@@ -6,6 +6,34 @@ It preserves the same arguments, stdin/stdout/stderr and console, and exits
 with its exit code. Unlike a `.bat` wrapper, it's a real `.exe`, so tools that
 look for the exe on `PATH` find it.
 
+## Install
+
+Download the latest exelink for your machine as `exelink.exe`, e.g. into a
+directory on `PATH`:
+
+x64:
+
+```bat
+curl -fLo exelink.exe https://github.com/marler8997/exelink/releases/latest/download/exelink-x86_64.exe
+```
+
+ARM64:
+
+```bat
+curl -fLo exelink.exe https://github.com/marler8997/exelink/releases/latest/download/exelink-aarch64.exe
+```
+
+32-bit x86:
+
+```bat
+curl -fLo exelink.exe https://github.com/marler8997/exelink/releases/latest/download/exelink-x86.exe
+```
+
+The links it makes are the same arch as it is (see below), so pick your
+machine's. Or build it with zig: `zig build` puts it in `zig-out\bin`.
+Versions are release dates, e.g. `v2026_10_24`; `exelink` with no arguments
+prints its version with the usage.
+
 ## Usage
 
 ```text

@@ -1,7 +1,7 @@
 //! exelink: creates, inspects and edits exe links (see src/template/main.zig, and `usage`).
 const std = @import("std");
 
-const usage =
+const usage = "exelink " ++ @embedFile("version") ++ "\n\n" ++
     \\usage:
     \\  exelink [options] LINK to TARGET   make LINK, a small exe that runs TARGET
     \\  exelink --print LINK               print the TARGET that LINK runs

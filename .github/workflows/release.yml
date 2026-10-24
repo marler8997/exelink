@@ -1,0 +1,21 @@
+name: Release
+on: [pull_request, workflow_dispatch]
+jobs:
+  release:
+    # the release step runs the tests, which run Windows exes
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: marler8997/setup-anyzig@master
+      - run: zig build release --summary all
+      - name: getversion
+        id: version
+        shell: bash
+        run: echo "version=$(cat zig-out/version-release)" >> $GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v7
+        with:
+          name: exelink-${{ steps.version.outputs.version }}
+          path: |
+            zig-out/exelink-x86_64.exe
+            zig-out/exelink-aarch64.exe
+            zig-out/exelink-x86.exe

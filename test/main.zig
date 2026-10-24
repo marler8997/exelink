@@ -379,7 +379,7 @@ test "exelink --unchecked links to a target that doesn't exist yet" {
     // asked for, the usage goes to stdout and isn't an error
     const help = try run(a, &.{ exelink, "--help" });
     try testing.expect(help.term.success());
-    try testing.expect(std.mem.startsWith(u8, help.stdout, "usage:"));
+    try testing.expect(std.mem.startsWith(u8, help.stdout, "exelink v"));
     // the link is untouched by all of these
     try testing.expectEqualStrings("Z:\\other.exe\n", (try run(a, &.{ exelink, "--print", link })).stdout);
 

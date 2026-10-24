@@ -11,6 +11,19 @@ pub fn build(b: *std.Build) void {
         "optimize",
         "exelink.exe's optimization mode",
     ) orelse .small;
+    // Calendar versions, as anyzig's: the release's UTC date, vYYYY_MM_DD. Any
+    // other build is a dev build, or hew's build of a revision.
+    const release_version = if (b.option([]const u8, "force-version", "The release version (vYYYY_MM_DD) instead of today's")) |v|
+        checkVersion(v)
+    else
+        calendarVersion(b);
+    const versions = b.addWriteFiles();
+    const release_version_file = versions.add("version-release", release_version);
+    const dev_version_file = versions.add("version-dev", if (b.graph.environ_map.get("HEW_BUILD_REVISION")) |r|
+        b.fmt("{s}-native", .{r})
+    else
+        b.fmt("{s}-dev", .{release_version}));
+
     const all = b.step("all", "Install exelink and template.exe for every arch, and the test tools");
     const test_step = b.step("test", "Run the tests, once for each arch this machine can run");
 
@@ -21,15 +34,7 @@ pub fn build(b: *std.Build) void {
         template.* = addTemplate(b, target);
         all.dependOn(&b.addInstallBinFile(template.*, b.fmt("{t}/template.exe", .{arch})).step);
 
-        // each exelink embeds its own arch's template, so it makes links
-        // for the machine it runs on
-        const exelink = b.createModule(.{
-            .root_source_file = b.path("src/exelink/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        });
-        exelink.addAnonymousImport("template_exe", .{ .root_source_file = template.* });
-        exelink_exe.* = b.addExecutable(.{ .name = "exelink", .root_module = exelink });
+        exelink_exe.* = addExelink(b, target, optimize, template.*, dev_version_file);
         all.dependOn(&b.addInstallArtifact(
             exelink_exe.*,
             .{ .dest_dir = .{ .override = .{ .custom = b.fmt("bin/{t}", .{arch}) } } },
@@ -75,6 +80,17 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .name = b.fmt("test-{t}", .{arch}), .root_module = tests })).step);
     }
 
+    // zig-out/exelink-ARCH.exe for every arch, with the release version, and
+    // zig-out/version-release. No version in the names: a release's assets,
+    // so releases/latest/download/exelink-ARCH.exe is always the newest.
+    const release = b.step("release", "Test, and put every arch's release exelink in zig-out");
+    release.dependOn(test_step);
+    release.dependOn(&b.addInstallFile(release_version_file, "version-release").step);
+    for (arches, templates) |arch, template| {
+        const exe = addExelink(b, windowsTarget(b, arch), .small, template, release_version_file);
+        release.dependOn(&b.addInstallFile(exe.getEmittedBin(), b.fmt("exelink-{t}.exe", .{arch})).step);
+    }
+
     // test tools, run on the machine that builds them
     all.dependOn(&b.addInstallArtifact(b.addExecutable(.{
         .name = "bench",
@@ -93,6 +109,38 @@ pub fn build(b: *std.Build) void {
             .single_threaded = true,
         }),
     }), .{}).step);
+}
+
+/// Each exelink embeds its own arch's template, so it makes links for the
+/// machine it runs on.
+fn addExelink(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, template: std.Build.LazyPath, version: std.Build.LazyPath) *std.Build.Step.Compile {
+    const exelink = b.createModule(.{
+        .root_source_file = b.path("src/exelink/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exelink.addAnonymousImport("template_exe", .{ .root_source_file = template });
+    exelink.addAnonymousImport("version", .{ .root_source_file = version });
+    return b.addExecutable(.{ .name = "exelink", .root_module = exelink });
+}
+
+/// Today, in UTC: vYYYY_MM_DD.
+fn calendarVersion(b: *std.Build) []const u8 {
+    const now: std.time.epoch.EpochSeconds = .{ .secs = @intCast(std.Io.Clock.real.now(b.graph.io).toSeconds()) };
+    const year_day = now.getEpochDay().calculateYearDay();
+    const month_day = year_day.calculateMonthDay();
+    // day_index counts from 0
+    return b.fmt("v{d}_{d:0>2}_{d:0>2}", .{ year_day.year, @backingInt(month_day.month), month_day.day_index + 1 });
+}
+
+fn checkVersion(v: []const u8) []const u8 {
+    if (v.len != 11 or v[0] != 'v' or v[5] != '_' or v[8] != '_')
+        std.debug.panic("-Dforce-version='{s}': expected vYYYY_MM_DD", .{v});
+    _ = std.fmt.parseInt(u16, v[1..5], 10) catch std.debug.panic("-Dforce-version='{s}': bad year", .{v});
+    const month = std.fmt.parseInt(u8, v[6..8], 10) catch std.debug.panic("-Dforce-version='{s}': bad month", .{v});
+    const day = std.fmt.parseInt(u8, v[9..11], 10) catch std.debug.panic("-Dforce-version='{s}': bad day", .{v});
+    if (month < 1 or month > 12 or day < 1 or day > 31) std.debug.panic("-Dforce-version='{s}': no such month or day", .{v});
+    return v;
 }
 
 fn windowsTarget(b: *std.Build, arch: std.Target.Cpu.Arch) std.Build.ResolvedTarget {
