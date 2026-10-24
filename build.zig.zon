@@ -1,0 +1,12 @@
+.{
+    .name = .exelink,
+    .fingerprint = 0xe5a98d40f7b381b9,
+    .version = "0.0.1",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+    },
+}

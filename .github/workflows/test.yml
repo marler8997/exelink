@@ -1,0 +1,13 @@
+name: Test
+on: [pull_request, workflow_dispatch]
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [windows-latest, windows-11-arm]
+      fail-fast: false
+    runs-on: ${{matrix.os}}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: marler8997/setup-anyzig@master
+      - run: zig build install all test --summary all
