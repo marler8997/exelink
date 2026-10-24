@@ -13,9 +13,15 @@ exelink [options] LINK to TARGET   make LINK, a small exe that runs TARGET
 exelink --print LINK               print the TARGET that LINK runs
 ```
 
-For example, to put python on `PATH` (where `C:\bin` is on `PATH`):
+For example, python is installed in `C:\path\to`, which isn't on `PATH`, and
+`C:\bin` is:
 
 ```bat
+> C:\path\to\python.exe --version
+Python 3.13.3
+> python --version
+'python' is not recognized as an internal or external command,
+operable program or batch file.
 > exelink C:\bin\python.exe to C:\path\to\python.exe
 created C:\bin\python.exe to C:\path\to\python.exe
 > python --version
