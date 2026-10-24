@@ -63,16 +63,6 @@ A link is the template plus its target's path (UTF-16):
 | aarch64 | 3,072 bytes |
 | x86     | 2,368 bytes |
 
-## Speed
-
-Launching a do-nothing target on an x64 machine (median of 3 runs of 200):
-
-| how                 | time    |
-|---------------------|---------|
-| the target directly | ~3.5 ms |
-| an exelink          | ~8.6 ms |
-| a `.bat` wrapper    | ~17 ms  |
-
 ## Errors
 
 A link exits with its target's exit code. If the link itself fails, it prints
@@ -113,3 +103,72 @@ first-class: a link is always a console exe, so started from Explorer it opens
 a console window, and it waits for its target, so a shell that runs it waits
 too (run directly, a GUI program returns the shell's prompt at once). A link
 doesn't copy its target's GUI subsystem, icon, or other resources.
+
+## Comparison with alternatives
+
+Ways to run a program by name when its directory isn't on `PATH`.
+
+### Behavior
+
+| Option | Found by `CreateProcess`/other tools | Target's sibling DLLs load | No admin needed | No extra process | Killing it kills the target | GUI targets | Survives target update |
+|---|---|---|---|---|---|---|---|
+| **exe shims:** exelink, Scoop shim, Chocolatey ShimGen | ✅ | ✅ | ✅ | ❌ (see Performance) | ⚠️ varies, see below | ⚠️ varies, see below | ✅ |
+| Symlink (`mklink`) | ✅ | ❌ | ⚠️ admin or Developer Mode | ✅ | ✅ | ✅ | ✅ |
+| Hard link (`mklink /H`) | ✅ | ❌ | ✅ (same volume only) | ✅ | ✅ | ✅ | ❌ |
+| Copy of the exe | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `.bat`/`.cmd` wrapper | ❌ | ✅ | ✅ | ❌ (see Performance) | ❌ | ⚠️ opens console, waits | ✅ |
+| App Paths registry key | ❌ (ShellExecute only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Shell alias/function | ❌ (that shell only) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+
+- **Found by `CreateProcess`/other tools:** `CreateProcess("foo")` only appends
+  `.exe`, so build tools, editors, `subprocess.run(["foo"])`, Go's `os/exec`,
+  and similar callers won't find a `.bat`/`.cmd` wrapper. App Paths entries are
+  only used by `ShellExecute` (Win+R, the Start menu, `start foo`), not by
+  typing `foo` in cmd or PowerShell.
+- **Target's sibling DLLs load:** a program run through a symlink, hard link,
+  or copy sees the link's location as its own path and directory, so the DLLs
+  and files next to the real exe aren't found. Most programs that aren't a
+  single file break: python run through a hard link can't find its standard
+  library.
+- **Survives target update:** an update that replaces the exe with a new file
+  leaves a hard link on the old file's contents, and a copy is never updated.
+- **`.bat`/`.cmd` wrappers** also show the "Terminate batch job (Y/N)?" prompt
+  on Ctrl+C, can mangle arguments containing `%`, `^`, `!` or quotes, and
+  leave the target running when cmd is killed.
+- **How the exe shims differ:**
+  - Killing the shim (a timeout, a stop button, Task Manager): an exelink and a
+    Scoop shim take the target with them (a job object); a ShimGen shim leaves
+    it running.
+  - GUI targets: an exelink opens a console and waits (see Scope); a Scoop
+    shim's console flashes and closes, and it waits; ShimGen makes GUI shims
+    (`--shimgen-gui`).
+  - A target that requires elevation gets the UAC prompt through a Scoop shim
+    (`ShellExecuteEx`); through an exelink it fails with a message (see Errors).
+  - A Scoop shim ([kiennq/scoop-better-shimexe](https://github.com/kiennq/scoop-better-shimexe),
+    usable without Scoop) is two files per command: the shim and a `.shim` text
+    file naming the target, read on every launch, which can be edited to
+    retarget it and can add default arguments. An exelink is one file.
+  - ShimGen is closed-source and tied to Chocolatey. Its shims are .NET exes.
+
+### Performance
+
+Launching a do-nothing exe on an x64 machine, median of 3 runs of 200. CPU
+cycles and memory are the shim's own process, not the target's: the target's
+work is the same however it's started.
+
+| | Launch time | Added | CPU cycles | Peak working set | Peak private | Shim size | Size of the tool that makes shims |
+|---|---|---|---|---|---|---|---|
+| the target directly | 3.6 ms | | | | | | |
+| **exelink** | 9.1 ms | ~5.5 ms | 7.7 M | 3.6 MB | 0.5 MB | ~2.9 KB | 453 KB |
+| Scoop shim | 15.2 ms | ~11.6 ms | 23 M | 8.8 MB | 1.4 MB | 158 KB, and the `.shim` file | none: a copy of `shim.exe` |
+| Chocolatey ShimGen | 28.7 ms | ~25 ms | 84 M | 15.3 MB | 16.0 MB | 384 KB | 556 KB, and .NET's C# compiler |
+| `.bat` wrapper (`cmd /c`) | 17.3 ms | ~13.7 ms | 27 M | 8.5 MB | 7.6 MB | a line of text | |
+
+An exelink's 7.7 M cycles are mostly what starting any process costs: the
+do-nothing target itself uses 4.8 M. Scoop shim v3.2.2, Chocolatey 2.7.4.
+
+In short: for a single-file program with Developer Mode on, a symlink adds no
+process and handles GUI targets. Otherwise, the exe shims are the options that
+are real exes, load the target's DLLs and need no admin, and an exelink is the
+smallest and quickest of those measured, while a Scoop shim can be retargeted
+with a text editor and can elevate.

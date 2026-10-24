@@ -1,7 +1,9 @@
 //! bench N COMMAND_LINE...
 //! Runs each COMMAND_LINE N times with CreateProcessW (std handles to NUL),
 //! round-robin so background noise hits every command equally, after 5 warmup
-//! rounds, and prints min/median/mean in ms for each.
+//! rounds, and prints min/median/mean in ms for each, plus the median CPU cycles
+//! the process itself used (QueryProcessCycleTime: its threads, user and kernel,
+//! not its children) and its median peak working set and peak private bytes.
 //! Command lines are passed as-is, so "python.bat" style commands need "cmd /c".
 const std = @import("std");
 const w = std.os.windows;
@@ -23,9 +25,15 @@ pub fn main(init: std.process.Init) !void {
     _ = QueryPerformanceFrequency(&freq);
 
     const times = try a.alloc([]f64, cmds.len);
+    const cycles = try a.alloc([]u64, cmds.len);
+    const peak_ws = try a.alloc([]u64, cmds.len);
+    const peak_private = try a.alloc([]u64, cmds.len);
     const cmds16 = try a.alloc([:0]u16, cmds.len);
     for (cmds, 0..) |cmd, c| {
         times[c] = try a.alloc(f64, n);
+        cycles[c] = try a.alloc(u64, n);
+        peak_ws[c] = try a.alloc(u64, n);
+        peak_private[c] = try a.alloc(u64, n);
         cmds16[c] = try std.unicode.wtf8ToWtf16LeAllocZ(a, cmd);
     }
     const buf = try a.alloc(u16, 32768);
@@ -56,25 +64,60 @@ pub fn main(init: std.process.Init) !void {
                 std.debug.print("'{s}' exited with {}\n", .{ cmds[c], code });
                 std.process.exit(1);
             }
+            var cycle_count: u64 = undefined;
+            if (QueryProcessCycleTime(pi.hProcess, &cycle_count) == 0) {
+                std.debug.print("QueryProcessCycleTime failed for '{s}': {}\n", .{ cmds[c], GetLastError() });
+                std.process.exit(1);
+            }
+            var mem: PROCESS_MEMORY_COUNTERS = undefined;
+            if (K32GetProcessMemoryInfo(pi.hProcess, &mem, @sizeOf(PROCESS_MEMORY_COUNTERS)) == 0) {
+                std.debug.print("GetProcessMemoryInfo failed for '{s}': {}\n", .{ cmds[c], GetLastError() });
+                std.process.exit(1);
+            }
             _ = CloseHandle(pi.hProcess);
             _ = CloseHandle(pi.hThread);
-            if (i >= 5) times[c][i - 5] = @as(f64, @floatFromInt(end - start)) * 1000.0 / @as(f64, @floatFromInt(freq));
+            if (i >= 5) {
+                times[c][i - 5] = @as(f64, @floatFromInt(end - start)) * 1000.0 / @as(f64, @floatFromInt(freq));
+                cycles[c][i - 5] = cycle_count;
+                peak_ws[c][i - 5] = mem.peak_working_set;
+                peak_private[c][i - 5] = mem.peak_pagefile_usage;
+            }
         }
     }
-    for (cmds, times) |cmd, t| {
+    for (cmds, times, cycles, peak_ws, peak_private) |cmd, t, cy, ws, pr| {
         std.mem.sort(f64, t, {}, std.sort.asc(f64));
         var sum: f64 = 0;
         for (t) |x| sum += x;
-        std.debug.print("min {d:6.2}  median {d:6.2}  mean {d:6.2} ms  {s}\n", .{ t[0], t[n / 2], sum / @as(f64, @floatFromInt(n)), cmd });
+        std.debug.print("min {d:6.2}  median {d:6.2}  mean {d:6.2} ms  cycles {d:>10}  peak ws {d:>6} KB  peak private {d:>6} KB  {s}\n", .{
+            t[0],       t[n / 2],          sum / @as(f64, @floatFromInt(n)),
+            median(cy), median(ws) / 1024, median(pr) / 1024,
+            cmd,
+        });
     }
 }
 
+fn median(xs: []u64) u64 {
+    std.mem.sort(u64, xs, {}, std.sort.asc(u64));
+    return xs[xs.len / 2];
+}
+
 const SECURITY_ATTRIBUTES = extern struct { nLength: u32, lpSecurityDescriptor: ?*anyopaque, bInheritHandle: i32 };
+const PROCESS_MEMORY_COUNTERS = extern struct {
+    cb: u32 = @sizeOf(PROCESS_MEMORY_COUNTERS),
+    page_faults: u32,
+    peak_working_set: usize,
+    working_set: usize,
+    quota: [4]usize,
+    pagefile_usage: usize,
+    peak_pagefile_usage: usize,
+};
 const PROCESS_INFORMATION = extern struct { hProcess: w.HANDLE, hThread: w.HANDLE, dwProcessId: u32, dwThreadId: u32 };
 extern "kernel32" fn CreateFileW([*:0]const u16, u32, u32, ?*SECURITY_ATTRIBUTES, u32, u32, ?w.HANDLE) callconv(.winapi) w.HANDLE;
 extern "kernel32" fn CreateProcessW(?[*:0]const u16, ?[*:0]u16, ?*anyopaque, ?*anyopaque, i32, u32, ?*anyopaque, ?[*:0]const u16, *w.STARTUPINFOW, *PROCESS_INFORMATION) callconv(.winapi) i32;
 extern "kernel32" fn WaitForSingleObject(w.HANDLE, u32) callconv(.winapi) u32;
 extern "kernel32" fn GetExitCodeProcess(w.HANDLE, *u32) callconv(.winapi) i32;
+extern "kernel32" fn QueryProcessCycleTime(w.HANDLE, *u64) callconv(.winapi) i32;
+extern "kernel32" fn K32GetProcessMemoryInfo(w.HANDLE, *PROCESS_MEMORY_COUNTERS, u32) callconv(.winapi) i32;
 extern "kernel32" fn CloseHandle(w.HANDLE) callconv(.winapi) i32;
 extern "kernel32" fn GetLastError() callconv(.winapi) u32;
 extern "kernel32" fn QueryPerformanceCounter(*i64) callconv(.winapi) i32;
