@@ -252,6 +252,19 @@ test "Ctrl+C reaches the target, and the link still exits with its exit code" {
     try testing.expectEqual(std.process.Child.Term{ .exited = 7 }, r.term);
 }
 
+test "killing the link kills its target, and only it: not a process the target started" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const link = try probeLink(a, &tmp);
+    const r = try run(a, &.{ paths.probe, "kill", link });
+    try testing.expectEqualStrings("", r.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, r.term);
+}
+
 test "a detached link runs its target detached, without a console window" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

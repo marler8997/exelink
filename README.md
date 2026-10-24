@@ -27,9 +27,9 @@ A link is the template plus its target's path (UTF-16):
 
 | arch    | template |
 |---------|----------|
-| x86_64  | 2,496 bytes |
+| x86_64  | 2,816 bytes |
 | aarch64 | 3,072 bytes |
-| x86     | 2,080 bytes |
+| x86     | 2,368 bytes |
 
 ## Speed
 
@@ -54,9 +54,10 @@ C:\bin\python.exe: can't find 'C:\path\to\python.exe': 0x80070002
 ```
 
 Ctrl+C goes to the target as usual; the link keeps waiting, so it still exits
-with the target's exit code (Ctrl+Break ends the link). A link started without
-a console (detached) starts its target without one too. A link killed from
-outside (e.g. Task Manager) leaves its target running.
+with the target's exit code (Ctrl+Break ends the link, and so its target). A
+link started without a console (detached) starts its target without one too.
+A link killed from outside (a timeout, a stop button, Task Manager) takes its
+target with it.
 
 ## How it works
 

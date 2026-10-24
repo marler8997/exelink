@@ -211,6 +211,9 @@ const dlls = [_][]const u8{ "ntdll", "kernel32" };
 /// declarations in src/template/main.zig.
 const imports = [_]struct { []const u8, []const u8, u32 }{
     .{ "kernel32", "CreateProcessW", 10 },
+    .{ "ntdll", "NtCreateJobObject", 3 },
+    .{ "ntdll", "NtSetInformationJobObject", 4 },
+    .{ "ntdll", "NtAssignProcessToJobObject", 2 },
     .{ "ntdll", "NtTerminateProcess", 2 },
     .{ "ntdll", "NtResumeThread", 2 },
     .{ "ntdll", "NtWaitForSingleObject", 3 },

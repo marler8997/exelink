@@ -48,6 +48,21 @@ const DosHeader = extern struct {
     target_len: u32,
 };
 
+/// JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+const JobLimits = extern struct {
+    basic: extern struct {
+        user_time_limits: [2]i64,
+        flags: u32,
+        working_set: [2]usize,
+        process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    },
+    io: [6]u64,
+    memory: [4]usize,
+};
+
 /// PROCESS_INFORMATION
 const ProcessInfo = extern struct {
     process: ?*anyopaque,
@@ -81,6 +96,13 @@ fn copy(dst: [*]u16, src: []const u16) [*]u16 {
             return dst + src.len;
         },
     }
+}
+
+/// Zeroes `p.*`. Not std.mem.zeroes: for a large struct it calls memset,
+/// which we don't have; through a volatile pointer, LLVM can't make it one.
+fn zero(p: anytype) void {
+    const words: [*]volatile usize = @ptrCast(p);
+    for (0..@sizeOf(@TypeOf(p.*)) / @sizeOf(usize)) |i| words[i] = 0;
 }
 
 /// Our command line with argv[0] replaced by "TARGET", the rest untouched.
@@ -229,8 +251,23 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     if (app.len != target_dos.len) image[1] = '\\'; // "\??\" -> "\\?\"
     const cmdline = commandLine(link_params.CommandLine, target);
 
+    // The target is killed if we are (a timeout, a stop button, taskkill): in
+    // a job closed when we exit, however we exit. Silent breakaway: only the
+    // target is in it, not what the target starts. Made before the target, so
+    // failing leaves nothing behind. Not
+    // inheritable (no attributes): the target holding it would keep it open.
+    var job: ?*anyopaque = undefined;
+    const job_status = NtCreateJobObject.get()(&job, 0x1F003F, null); // JOB_OBJECT_ALL_ACCESS
+    if (job_status < 0) fail(lenPrefixed("can't make a job for"), target_dos, @bitCast(job_status));
+    var limits: JobLimits = undefined;
+    zero(&limits);
+    limits.basic.flags = 0x2000 | 0x1000; // KILL_ON_JOB_CLOSE, SILENT_BREAKAWAY_OK
+    const limits_status = NtSetInformationJobObject.get()(job, 9, &limits, @sizeOf(JobLimits)); // JobObjectExtendedLimitInformation
+    if (limits_status < 0) fail(lenPrefixed("can't make a job for"), target_dos, @bitCast(limits_status));
+
     // CreateProcessW, not RtlCreateUserProcessEx: see the top of this file
-    var si = std.mem.zeroes(windows.STARTUPINFOW);
+    var si: windows.STARTUPINFOW = undefined;
+    zero(&si);
     si.cb = @sizeOf(windows.STARTUPINFOW);
     var child: ProcessInfo = undefined;
     // Suspended, so the Ctrl+C below is set only after the child copied our
@@ -253,11 +290,16 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     // From here the child exists, so a failure must not leave it behind,
     // running or suspended, for a caller who was told we failed.
 
+    // while it's suspended, so it can't start anything outside the job first
+    const assign_status = NtAssignProcessToJobObject.get()(job, process);
+    if (assign_status < 0) failChild(process, lenPrefixed("can't make a job for"), target_dos, @bitCast(assign_status));
+
     // Ctrl+C goes to every process on the console. The child decides what it
     // means; we keep waiting, so we exit with its exit code, not when it's
     // still running. Set after the child copied our ConsoleFlags, which it
     // inherits (bit 0, what SetConsoleCtrlHandler(NULL, TRUE) sets). Ctrl+Break
-    // still ends us: ignoring it takes a handler routine.
+    // still ends us, and so the target (its job): ignoring it takes a handler
+    // routine.
     link_params.ConsoleFlags |= 1;
 
     const resume_status = NtResumeThread.get()(child.thread, null);
@@ -295,6 +337,9 @@ fn ntdll(comptime name: []const u8, comptime T: type) type {
     return import("ntdll", name, T);
 }
 const CreateProcessW = import("kernel32", "CreateProcessW", fn ([*:0]const u16, [*:0]u16, ?*anyopaque, ?*anyopaque, i32, u32, ?*anyopaque, ?[*:0]const u16, *windows.STARTUPINFOW, *ProcessInfo) callconv(.winapi) i32);
+const NtCreateJobObject = ntdll("NtCreateJobObject", fn (*?*anyopaque, u32, ?*anyopaque) callconv(.winapi) i32);
+const NtSetInformationJobObject = ntdll("NtSetInformationJobObject", fn (?*anyopaque, u32, *const anyopaque, u32) callconv(.winapi) i32);
+const NtAssignProcessToJobObject = ntdll("NtAssignProcessToJobObject", fn (?*anyopaque, ?*anyopaque) callconv(.winapi) i32);
 const NtTerminateProcess = ntdll("NtTerminateProcess", fn (?*anyopaque, u32) callconv(.winapi) i32);
 const NtResumeThread = ntdll("NtResumeThread", fn (?*anyopaque, ?*u32) callconv(.winapi) i32);
 const NtWaitForSingleObject = ntdll("NtWaitForSingleObject", fn (?*anyopaque, u8, ?*anyopaque) callconv(.winapi) i32);
