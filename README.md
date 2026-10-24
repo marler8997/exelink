@@ -8,14 +8,40 @@ look for the exe on `PATH` find it.
 
 ## Usage
 
+```text
+exelink [options] LINK to TARGET   make LINK, a small exe that runs TARGET
+exelink --print LINK               print the TARGET that LINK runs
+```
+
+For example, to put python on `PATH` (where `C:\bin` is on `PATH`):
+
 ```bat
-> exelink create C:\bin\python.exe C:\path\to\python.exe
-> exelink print-target C:\bin\python.exe
+> exelink C:\bin\python.exe to C:\path\to\python.exe
+created C:\bin\python.exe to C:\path\to\python.exe
+> python --version
+Python 3.13.3
+> exelink --print C:\bin\python.exe
 C:\path\to\python.exe
 ```
 
-TARGET must exist unless `--unchecked`. Creating a link that exists replaces it
-(retargeting it), unless it's already that exact link.
+`python` now runs `C:\bin\python.exe`, the link, which runs
+`C:\path\to\python.exe` with the same arguments, stdin/stdout/stderr and
+console, and exits with its exit code.
+
+TARGET must exist, unless `--unchecked`. An absolute TARGET is stored resolved
+(symlinks followed). A relative one is stored as given and resolved against
+LINK's directory each time LINK runs, so a link and its target can move
+together:
+
+```bat
+> exelink C:\tools\bin\python.exe to ..\python\python.exe
+```
+
+runs `C:\tools\python\python.exe`, and still finds it after `C:\tools` moves.
+
+Running exelink on an existing link replaces it, so the same command retargets
+a link; if it's already that exact link, it's left alone. Any other file at
+LINK is refused (most likely a wrong path) unless `-f`/`--force`.
 
 A link is the arch of the exelink that made it: each exelink embeds its own
 arch's template. Use the machine's native one; an x86 link on x64 runs under
@@ -73,9 +99,6 @@ the target would lose what its manifest declares (UTF-8 code page, long-path
 and DPI awareness, ...), and a target that requires elevation would run
 unelevated. With `CreateProcessW`, that target fails with a message instead:
 a link can't elevate.
-
-A relative TARGET is stored as given and resolved against the link's own
-directory each time it runs, so a link and its target can move together.
 
 ## Scope
 

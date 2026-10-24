@@ -14,7 +14,7 @@
 //! instead of failing). CreateProcessW is also smaller here (-160 bytes):
 //! it builds the process parameters and the console reference we built.
 //!
-//! This file builds the link template. `exelink create` copies it, appends the
+//! This file builds the link template. `exelink` copies it, appends the
 //! target's NT path ("\??\C:\...", UTF-16) to the end of its last section
 //! (growing the section, so the path is mapped with the image), and writes
 //! its RVA and length into the DOS header's reserved bytes (`DosHeader`): a
@@ -235,7 +235,7 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     const link_params = peb.ProcessParameters;
 
     const dos: *const DosHeader = @ptrCast(@alignCast(peb.ImageBaseAddress));
-    // Only `exelink create`'s copies are links, so this is the template run
+    // Only `exelink`'s copies are links, so this is the template run
     // directly: a mistake, not an input to handle.
     if (dos.target_len == 0) @trap();
     var target: []const u16 = @as([*]const u16, @ptrCast(@alignCast(@as([*]const u8, @ptrCast(dos)) + dos.target_rva)))[0..dos.target_len];

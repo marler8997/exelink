@@ -66,7 +66,7 @@ test "a link runs its target with our args, stdin and exit code" {
     try tmp.dir.createDirPath(io, "tärget 😀");
     try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, "tärget 😀\\echo.exe", io, .{});
     const echo = try tmp.dir.realPathFileAlloc(io, "tärget 😀\\echo.exe", a);
-    try testing.expect((try run(a, &.{ paths.exelink, "create", link, echo })).term.success());
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", echo })).term.success());
 
     // args std must quote and escape, including empty and trailing-backslash ones
     const args = [_][]const u8{ "a b", "tab\there", "quo\"te", "", "trail\\", "\\\\x\\\"", "ü😀" };
@@ -106,7 +106,7 @@ test "a link runs its target with our args, stdin and exit code" {
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "\"", echo, "\"", rest, "\nfrom stdin" }), out);
 }
 
-test "exelink print-target, and create retargets a link" {
+test "exelink --print, and making a link again retargets it" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -117,14 +117,14 @@ test "exelink print-target, and create retargets a link" {
     const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
     const echo = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.echo, a);
     const exelink = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.exelink, a);
-    try testing.expect((try run(a, &.{ exelink, "create", link, echo })).term.success());
+    try testing.expect((try run(a, &.{ exelink, link, "to", echo })).term.success());
 
-    const t1 = try run(a, &.{ exelink, "print-target", link });
+    const t1 = try run(a, &.{ exelink, "--print", link });
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ echo, "\n" }), t1.stdout);
 
-    // creating over a link retargets it
-    try testing.expect((try run(a, &.{ exelink, "create", link, exelink })).term.success());
-    const t2 = try run(a, &.{ exelink, "print-target", link });
+    // making a link over a link retargets it
+    try testing.expect((try run(a, &.{ exelink, link, "to", exelink })).term.success());
+    const t2 = try run(a, &.{ exelink, "--print", link });
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ exelink, "\n" }), t2.stdout);
     // and it runs the new target: exelink with no args prints usage, exits 1
     try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{link})).term);
@@ -137,17 +137,17 @@ test "exelink print-target, and create retargets a link" {
     const last = pe + 24 + std.mem.readInt(u16, img[pe + 20 ..][0..2], .little) + 40 * (nsections - 1);
     img[std.mem.readInt(u32, img[last + 20 ..][0..4], .little)] ^= 0xff;
     try tmp.dir.writeFile(io, .{ .sub_path = "l.exe", .data = img });
-    const t3 = try run(a, &.{ exelink, "print-target", link });
+    const t3 = try run(a, &.{ exelink, "--print", link });
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ exelink, "\n" }), t3.stdout);
-    const retargeted = try run(a, &.{ exelink, "create", link, echo });
-    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: link was updated: ", link, " -> ", echo, " (was ", exelink, ")\n" }), retargeted.stderr);
+    const retargeted = try run(a, &.{ exelink, link, "to", echo });
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "updated ", link, " to ", echo, " (was ", exelink, ")\n" }), retargeted.stderr);
 
-    // print-target refuses what isn't a link
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "print-target", echo })).term);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "print-target", paths.template })).term);
+    // --print refuses what isn't a link
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--print", echo })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--print", paths.template })).term);
 }
 
-test "create leaves a link that already runs TARGET untouched, even while it runs" {
+test "exelink leaves a link that already runs TARGET untouched, even while it runs" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -158,20 +158,20 @@ test "create leaves a link that already runs TARGET untouched, even while it run
     const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
     const echo = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.echo, a);
     const exelink = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.exelink, a);
-    try testing.expect((try run(a, &.{ exelink, "create", link, echo })).term.success());
+    try testing.expect((try run(a, &.{ exelink, link, "to", echo })).term.success());
 
     // running, blocked reading stdin, so Windows locks l.exe
     var child = try std.process.spawn(io, .{ .argv = &.{link}, .stdin = .pipe, .stdout = .ignore, .create_no_window = false });
     defer child.kill(io);
-    try testing.expect((try run(a, &.{ exelink, "create", link, echo })).term.success());
+    try testing.expect((try run(a, &.{ exelink, link, "to", echo })).term.success());
     // a different target has to rewrite it, which the lock refuses
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "create", link, exelink })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, link, "to", exelink })).term);
     child.stdin.?.close(io);
     child.stdin = null;
     try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, try child.wait(io));
 }
 
-test "create says on stderr whether it created, updated or left the link" {
+test "exelink says on stderr whether it created, updated or left the link" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -183,24 +183,33 @@ test "create says on stderr whether it created, updated or left the link" {
     const echo = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.echo, a);
     const exelink = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.exelink, a);
 
-    const created = try run(a, &.{ exelink, "create", link, echo });
+    const created = try run(a, &.{ exelink, link, "to", echo });
     try testing.expect(created.term.success());
-    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: link was created: ", link, " -> ", echo, "\n" }), created.stderr);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "created ", link, " to ", echo, "\n" }), created.stderr);
 
-    const same = try run(a, &.{ exelink, "create", link, echo });
+    const same = try run(a, &.{ exelink, link, "to", echo });
     try testing.expect(same.term.success());
-    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: link is already created: ", link, " -> ", echo, "\n" }), same.stderr);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ link, " is already a link to ", echo, "\n" }), same.stderr);
 
-    const updated = try run(a, &.{ exelink, "create", link, exelink });
+    const updated = try run(a, &.{ exelink, link, "to", exelink });
     try testing.expect(updated.term.success());
-    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: link was updated: ", link, " -> ", exelink, " (was ", echo, ")\n" }), updated.stderr);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "updated ", link, " to ", exelink, " (was ", echo, ")\n" }), updated.stderr);
 
-    // a file that isn't a link is replaced too
+    // a file that isn't a link is refused and left alone, a wrong path most
+    // likely, unless --force (-f)
     try tmp.dir.writeFile(io, .{ .sub_path = "other.exe", .data = "not a link" });
     const other = try std.fs.path.join(a, &.{ dir, "other.exe" });
-    const replaced = try run(a, &.{ exelink, "create", other, echo });
+    const refused = try run(a, &.{ exelink, other, "to", echo });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, refused.term);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: '", other, "' exists and isn't an exelink, so it's left alone (--force replaces it)\n" }), refused.stderr);
+    try testing.expectEqualStrings("not a link", try tmp.dir.readFileAlloc(io, "other.exe", a, .unlimited));
+    const replaced = try run(a, &.{ exelink, "-f", other, "to", echo });
     try testing.expect(replaced.term.success());
-    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: link was updated: ", other, " -> ", echo, " (was a file that isn't an exelink)\n" }), replaced.stderr);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "created ", other, " to ", echo, " (replaced a file that isn't a link)\n" }), replaced.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, (try run(a, &.{other})).term);
+    // --force is the long form
+    try tmp.dir.writeFile(io, .{ .sub_path = "other.exe", .data = "not a link" });
+    try testing.expect((try run(a, &.{ exelink, "--force", other, "to", echo })).term.success());
     try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, (try run(a, &.{other})).term);
 }
 
@@ -209,7 +218,7 @@ fn probeLink(a: std.mem.Allocator, tmp: *testing.TmpDir) ![]const u8 {
     const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
     const link = try std.fs.path.join(a, &.{ dir, "probe-link.exe" });
     const probe = try std.Io.Dir.cwd().realPathFileAlloc(io, paths.probe, a);
-    try testing.expect((try run(a, &.{ paths.exelink, "create", link, probe })).term.success());
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", probe })).term.success());
     return link;
 }
 
@@ -229,7 +238,7 @@ test "the target sees its own path as when run directly, past MAX_PATH too" {
     for ([_][]const u8{ "", deep }) |sub| {
         const target = try std.fs.path.join(a, &.{ dir, sub, "probe.exe" });
         const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
-        try testing.expect((try run(a, &.{ paths.exelink, "create", link, target })).term.success());
+        try testing.expect((try run(a, &.{ paths.exelink, link, "to", target })).term.success());
         const r = try run(a, &.{ link, "self" });
         try testing.expect(r.term.success());
         // a path past MAX_PATH only runs as "\\?\"
@@ -304,7 +313,7 @@ test "the unpatched template crashes" {
     }
 }
 
-test "create --unchecked links to a target that doesn't exist yet" {
+test "exelink --unchecked links to a target that doesn't exist yet" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -319,8 +328,8 @@ test "create --unchecked links to a target that doesn't exist yet" {
         }
     }.f;
 
-    // create refuses it, and writes nothing
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try ran(a, &.{ exelink, "create", "l.exe", "later\\t.exe" }, dir)).term);
+    // exelink refuses it, and writes nothing
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try ran(a, &.{ exelink, "l.exe", "to", "later\\t.exe" }, dir)).term);
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "l.exe", .{}));
 
     // --unchecked stores a relative target as given, without looking at it.
@@ -328,9 +337,9 @@ test "create --unchecked links to a target that doesn't exist yet" {
     // would look in sub\\later.
     try tmp.dir.createDirPath(io, "sub");
     const sub = try std.fs.path.join(a, &.{ dir, "sub" });
-    try testing.expect((try ran(a, &.{ exelink, "create", "--unchecked", "..\\l.exe", "later\\.\\t.exe" }, sub)).term.success());
+    try testing.expect((try ran(a, &.{ exelink, "--unchecked", "..\\l.exe", "to", "later\\.\\t.exe" }, sub)).term.success());
     const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
-    try testing.expectEqualStrings("later\\.\\t.exe\n", (try run(a, &.{ exelink, "print-target", link })).stdout);
+    try testing.expectEqualStrings("later\\.\\t.exe\n", (try run(a, &.{ exelink, "--print", link })).stdout);
 
     // until the target exists, the link says so on stderr and exits with the
     // NTSTATUS (std keeps its low byte): first a missing directory, then a
@@ -346,19 +355,37 @@ test "create --unchecked links to a target that doesn't exist yet" {
     try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, "later\\t.exe", io, .{});
     try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, (try run(a, &.{link})).term);
 
-    // retargeting: --unchecked accepts another missing path, plain create refuses one
-    try testing.expect((try run(a, &.{ exelink, "create", "--unchecked", link, "Z:\\nope.exe" })).term.success());
-    try testing.expectEqualStrings("Z:\\nope.exe\n", (try run(a, &.{ exelink, "print-target", link })).stdout);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "create", link, "Z:\\nope.exe" })).term);
+    // retargeting: --unchecked accepts another missing path, plain exelink refuses one
+    try testing.expect((try run(a, &.{ exelink, "--unchecked", link, "to", "Z:\\nope.exe" })).term.success());
+    try testing.expectEqualStrings("Z:\\nope.exe\n", (try run(a, &.{ exelink, "--print", link })).stdout);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, link, "to", "Z:\\nope.exe" })).term);
 
     // the flag can come anywhere; unknown ones are refused
-    try testing.expect((try run(a, &.{ exelink, "create", link, "Z:\\other.exe", "--unchecked" })).term.success());
-    try testing.expectEqualStrings("Z:\\other.exe\n", (try run(a, &.{ exelink, "print-target", link })).stdout);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "create", "--nope", link, paths.echo })).term);
+    try testing.expect((try run(a, &.{ exelink, link, "to", "Z:\\other.exe", "--unchecked" })).term.success());
+    try testing.expectEqualStrings("Z:\\other.exe\n", (try run(a, &.{ exelink, "--print", link })).stdout);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--nope", link, "to", paths.echo })).term);
+    // and so are --print with --unchecked or --force, a missing or other word for "to", and the wrong number of paths
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--print", "--unchecked", link })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--print", "-f", link })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--unchecked", link, "Z:\\other.exe" })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--unchecked", link, "from", "Z:\\other.exe" })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--print", link, link })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, link })).term);
+    // two paths without "to" could mean either order: the error spells out what the fix means
+    const no_to = try run(a, &.{ exelink, link, "Z:\\other.exe" });
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, no_to.term);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "exelink: missing \"to\": `exelink ", link, " to Z:\\other.exe` makes ", link, " a link to Z:\\other.exe\n" }), no_to.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{exelink})).term);
+    // asked for, the usage goes to stdout and isn't an error
+    const help = try run(a, &.{ exelink, "--help" });
+    try testing.expect(help.term.success());
+    try testing.expect(std.mem.startsWith(u8, help.stdout, "usage:"));
+    // the link is untouched by all of these
+    try testing.expectEqualStrings("Z:\\other.exe\n", (try run(a, &.{ exelink, "--print", link })).stdout);
 
     // rooted and drive-relative targets are ambiguous: refused
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "create", "--unchecked", link, "\\t.exe" })).term);
-    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "create", "--unchecked", link, "C:t.exe" })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--unchecked", link, "to", "\\t.exe" })).term);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 1 }, (try run(a, &.{ exelink, "--unchecked", link, "to", "C:t.exe" })).term);
 }
 
 test "a relative target resolves against the link's directory, and moves with it" {
@@ -376,15 +403,15 @@ test "a relative target resolves against the link's directory, and moves with it
 
     // from tmp, where ..\\tools doesn't exist: checked against LINK's directory
     const created = try std.process.run(a, io, .{
-        .argv = &.{ exelink, "create", "a\\bin\\l.exe", "..\\tools\\echo.exe" },
+        .argv = &.{ exelink, "a\\bin\\l.exe", "to", "..\\tools\\echo.exe" },
         .cwd = .{ .path = dir },
         .create_no_window = false,
     });
     try testing.expect(created.term.success());
     const l = try std.fs.path.join(a, &.{ dir, "a", "bin", "l.exe" });
-    try testing.expectEqualStrings("..\\tools\\echo.exe\n", (try run(a, &.{ exelink, "print-target", l })).stdout);
+    try testing.expectEqualStrings("..\\tools\\echo.exe\n", (try run(a, &.{ exelink, "--print", l })).stdout);
     // a relative link to it, started by it with an NT image path
-    try testing.expect((try run(a, &.{ exelink, "create", try std.fs.path.join(a, &.{ dir, "a", "bin", "l2.exe" }), "l.exe" })).term.success());
+    try testing.expect((try run(a, &.{ exelink, try std.fs.path.join(a, &.{ dir, "a", "bin", "l2.exe" }), "to", "l.exe" })).term.success());
 
     try tmp.dir.rename("a", tmp.dir, "moved", io);
     const echo = try std.fs.path.join(a, &.{ dir, "moved", "tools", "echo.exe" });
@@ -407,7 +434,7 @@ test "a target that isn't an exe: the link says it can't start it, and exits wit
     try tmp.dir.writeFile(io, .{ .sub_path = "t.exe", .data = "not an exe" });
     const target = try std.fs.path.join(a, &.{ dir, "t.exe" });
     const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
-    try testing.expect((try run(a, &.{ paths.exelink, "create", link, target })).term.success());
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", target })).term.success());
     const r = try run(a, &.{link});
     // ERROR_EXE_MACHINE_TYPE_MISMATCH (what Windows says for a text file), as an HRESULT
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ link, ": can't start '", target, "': 0x800700D8\n" }), r.stderr);
@@ -429,7 +456,7 @@ test "a command line too long for the target: the link says so, and exits with t
     const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
     const target = try std.fs.path.join(a, &.{ dir, &deep, "echo.exe" });
     const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
-    try testing.expect((try run(a, &.{ paths.exelink, "create", link, target })).term.success());
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", target })).term.success());
 
     // "LINK" ARG: just under Windows' 32767, so CreateProcessW takes it
     const arg = try a.alloc(u8, 32760 - (link.len + 3));

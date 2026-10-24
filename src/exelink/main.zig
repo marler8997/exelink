@@ -3,15 +3,28 @@ const std = @import("std");
 
 const usage =
     \\usage:
-    \\  exelink create [--unchecked] LINK TARGET   make LINK an exe that runs TARGET
-    \\  exelink print-target LINK                  print the target LINK runs
+    \\  exelink [options] LINK to TARGET   make LINK, a small exe that runs TARGET
+    \\  exelink --print LINK               print the TARGET that LINK runs
+    \\  exelink --help                     print this
     \\
-    \\TARGET must exist unless --unchecked. An absolute TARGET is stored resolved
-    \\(symlinks followed). A relative one is stored as given and resolved against
-    \\LINK's directory each time LINK runs, so the two can move together.
+    \\Running LINK runs TARGET with LINK's arguments, stdin/stdout/stderr and
+    \\console, and exits with TARGET's exit code, as if TARGET were run
+    \\directly. Put LINK in a directory on PATH to put TARGET on PATH, without
+    \\a .bat.
     \\
-    \\create replaces any existing LINK unless it's already this exact link,
-    \\and says which it did on stderr.
+    \\options:
+    \\  --unchecked   don't require TARGET to exist
+    \\  -f, --force   replace a file at LINK that isn't a link
+    \\
+    \\An absolute TARGET is stored resolved (symlinks followed). A relative one
+    \\is stored as given and resolved against LINK's directory each time LINK
+    \\runs, so the two can move together.
+    \\
+    \\An existing link at LINK is replaced, retargeting it, unless it's already
+    \\this exact link; which happened is said on stderr.
+    \\
+    \\example:
+    \\  exelink C:\bin\python.exe to C:\Python313\python.exe
     \\
 ;
 
@@ -26,25 +39,56 @@ pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2) fatal("{s}", .{usage});
-    const cmd = args[1];
-    if (std.mem.eql(u8, cmd, "create")) {
-        var unchecked = false;
-        var positional: [2][]const u8 = undefined;
-        var n: usize = 0;
-        for (args[2..]) |arg| {
-            if (std.mem.eql(u8, arg, "--unchecked")) {
-                unchecked = true;
-            } else if (std.mem.startsWith(u8, arg, "-")) {
-                fatal("unknown option '{s}'\n{s}", .{ arg, usage });
-            } else {
-                if (n == positional.len) fatal("{s}", .{usage});
-                positional[n] = arg;
-                n += 1;
-            }
+    if (args.len == 1) {
+        std.debug.print("{s}", .{usage});
+        std.process.exit(1);
+    }
+    var unchecked = false;
+    var print = false;
+    var force = false;
+    var positional: [3][]const u8 = undefined;
+    var n: usize = 0;
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            writeStdout(io, "{s}", .{usage});
+            return;
+        } else if (std.mem.eql(u8, arg, "--unchecked")) {
+            unchecked = true;
+        } else if (std.mem.eql(u8, arg, "--force") or std.mem.eql(u8, arg, "-f")) {
+            force = true;
+        } else if (std.mem.eql(u8, arg, "--print")) {
+            print = true;
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            fatal("unknown option '{s}'", .{arg});
+        } else {
+            if (n == positional.len) fatal("expected LINK to TARGET, got more: '{s}'", .{arg});
+            positional[n] = arg;
+            n += 1;
         }
-        if (n != positional.len) fatal("{s}", .{usage});
-        const link_path, const target_arg = positional;
+    }
+    if (print) {
+        if (unchecked) fatal("--unchecked is for making a link, not for --print", .{});
+        if (force) fatal("--force is for making a link, not for --print", .{});
+        if (n != 1) fatal("--print takes one path, LINK, got {d}", .{n});
+        const link = std.Io.Dir.cwd().readFileAlloc(io, positional[0], arena, .limited(64 * 1024 * 1024)) catch |e|
+            fatal("read '{s}': {s}", .{ positional[0], @errorName(e) });
+        const target = readTarget(link) orelse fatal("'{s}' is not an exelink", .{positional[0]});
+        writeStdout(io, "{f}\n", .{fmtWtf16(target)});
+    } else {
+        // "to" says which path is which, so they can't be swapped by mistake
+        // "to" says which path is the link: say what's missing with the
+        // user's own paths, since two paths alone could mean either order
+        switch (n) {
+            0 => fatal("expected LINK to TARGET", .{}),
+            1 => fatal("expected LINK to TARGET, got only '{s}'", .{positional[0]}),
+            2 => if (std.mem.eql(u8, positional[1], "to"))
+                fatal("expected TARGET after '{s} to'", .{positional[0]})
+            else
+                fatal("missing \"to\": `exelink {s} to {s}` makes {s} a link to {s}", .{ positional[0], positional[1], positional[0], positional[1] }),
+            else => if (!std.mem.eql(u8, positional[1], "to"))
+                fatal("expected \"to\" between LINK and TARGET, got '{s}'", .{positional[1]}),
+        }
+        const link_path, _, const target_arg = positional;
         const relative = switch (std.fs.path.getWin32PathType(u8, target_arg)) {
             .drive_absolute => false,
             .relative => true,
@@ -71,44 +115,48 @@ pub fn main(init: std.process.Init) !void {
         const link = try create(arena, target, relative);
         // A link is the template plus its target, so changing a link's target
         // is creating it anew; no separate `set`.
-        // What LINK was, for the message; null if it didn't exist.
-        const not_link = "a file that isn't an exelink";
-        var was: ?[]const u8 = null;
+        // What LINK was, for the message.
+        const Was = union(enum) { nothing, link: []align(1) const u16, file };
+        var was: Was = .nothing;
         if (std.Io.Dir.cwd().readFileAlloc(io, link_path, arena, .limited(64 * 1024 * 1024))) |old| {
             // already this link: not rewritten, so it works while the link is
             // running (Windows locks a running exe) and keeps its timestamps
             if (std.mem.eql(u8, old, link)) {
-                std.debug.print("exelink: link is already created: {s} -> {s}\n", .{ link_path, target });
+                std.debug.print("{s} is already a link to {s}\n", .{ link_path, target });
                 return;
             }
-            was = if (readTarget(old)) |t| try std.fmt.allocPrint(arena, "{f}", .{fmtWtf16(t)}) else not_link;
+            was = if (readTarget(old)) |t| .{ .link = t } else if (force) .file else notLink(link_path);
         } else |e| switch (e) {
             error.FileNotFound => {},
             // bigger than any link
-            error.StreamTooLong => was = not_link,
+            error.StreamTooLong => was = if (force) .file else notLink(link_path),
             else => fatal("read '{s}': {s}", .{ link_path, @errorName(e) }),
         }
         // fails if the link is running
         std.Io.Dir.cwd().writeFile(io, .{ .sub_path = link_path, .data = link }) catch |e|
             fatal("write '{s}': {s}", .{ link_path, @errorName(e) });
-        if (was) |old|
-            std.debug.print("exelink: link was updated: {s} -> {s} (was {s})\n", .{ link_path, target, old })
-        else
-            std.debug.print("exelink: link was created: {s} -> {s}\n", .{ link_path, target });
-    } else if (std.mem.eql(u8, cmd, "print-target")) {
-        if (args.len != 3) fatal("{s}", .{usage});
-        const link = std.Io.Dir.cwd().readFileAlloc(io, args[2], arena, .limited(64 * 1024 * 1024)) catch |e|
-            fatal("read '{s}': {s}", .{ args[2], @errorName(e) });
-        const target = readTarget(link) orelse fatal("'{s}' is not an exelink", .{args[2]});
-        var buf: [4096]u8 = undefined;
-        var stdout = std.Io.File.stdout().writerStreaming(io, &buf);
-        const err: ?error{WriteFailed} = blk: {
-            stdout.interface.print("{f}\n", .{fmtWtf16(target)}) catch |e| break :blk e;
-            stdout.interface.flush() catch |e| break :blk e;
-            break :blk null;
-        };
-        if (err) |_| fatal("write stdout: {s}", .{@errorName(stdout.err.?)});
-    } else fatal("unknown command '{s}'\n{s}", .{ cmd, usage });
+        switch (was) {
+            .nothing => std.debug.print("created {s} to {s}\n", .{ link_path, target }),
+            .link => |old| std.debug.print("updated {s} to {s} (was {f})\n", .{ link_path, target, fmtWtf16(old) }),
+            .file => std.debug.print("created {s} to {s} (replaced a file that isn't a link)\n", .{ link_path, target }),
+        }
+    }
+}
+
+fn writeStdout(io: std.Io, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    var stdout = std.Io.File.stdout().writerStreaming(io, &buf);
+    const err: ?error{WriteFailed} = blk: {
+        stdout.interface.print(fmt, args) catch |e| break :blk e;
+        stdout.interface.flush() catch |e| break :blk e;
+        break :blk null;
+    };
+    if (err) |_| fatal("write stdout: {s}", .{@errorName(stdout.err.?)});
+}
+
+/// LINK exists and isn't a link: a wrong path, most likely, so it's kept.
+fn notLink(link_path: []const u8) noreturn {
+    fatal("'{s}' exists and isn't an exelink, so it's left alone (--force replaces it)", .{link_path});
 }
 
 fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
