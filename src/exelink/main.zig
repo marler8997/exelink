@@ -5,23 +5,12 @@ const usage =
     \\usage:
     \\  exelink [options] LINK to TARGET   make LINK, a small exe that runs TARGET
     \\  exelink --print LINK               print the TARGET that LINK runs
-    \\  exelink --help                     print this
-    \\
-    \\Running LINK runs TARGET with LINK's arguments, stdin/stdout/stderr and
-    \\console, and exits with TARGET's exit code, as if TARGET were run
-    \\directly. Put LINK in a directory on PATH to put TARGET on PATH, without
-    \\a .bat.
     \\
     \\options:
     \\  --unchecked   don't require TARGET to exist
     \\  -f, --force   replace a file at LINK that isn't a link
     \\
-    \\An absolute TARGET is stored resolved (symlinks followed). A relative one
-    \\is stored as given and resolved against LINK's directory each time LINK
-    \\runs, so the two can move together.
-    \\
-    \\An existing link at LINK is replaced, retargeting it, unless it's already
-    \\this exact link; which happened is said on stderr.
+    \\Supports relative paths to the LINK.
     \\
     \\example:
     \\  exelink C:\bin\python.exe to C:\Python313\python.exe
