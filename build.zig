@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = .ReleaseSmall,
             }),
+            .win32_manifest = b.path("test/probe/probe.manifest"),
         }).getEmittedBin());
         const tests = b.createModule(.{
             .root_source_file = b.path("test/main.zig"),

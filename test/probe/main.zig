@@ -10,6 +10,8 @@
 //!                         with the link's exit code
 //!   probe console         exits 10 if it has no console window, 11 if it has one
 //!   probe self            prints its own path, as GetModuleFileNameW gives it
+//!   probe acp             exits 0 if its code page is UTF-8, as its manifest
+//!                         (probe.manifest) asks, 1 if not
 //!   probe kill LINK       runs `LINK tree NAME`, kills the link once the target
 //!                         and its child are running, and exits 0 if the target
 //!                         died with it and the target's child didn't
@@ -71,6 +73,8 @@ pub fn main(init: std.process.Init) !void {
         if (!target_died) std.debug.print("probe: the target outlived the killed link\n", .{});
         if (!child_lives) std.debug.print("probe: the target's child died with the link\n", .{});
         std.process.exit(if (target_died and child_lives) 0 else 1);
+    } else if (std.mem.eql(u8, mode, "acp")) {
+        std.process.exit(if (GetACP() == 65001) 0 else 1);
     } else if (std.mem.eql(u8, mode, "console")) {
         std.process.exit(if (GetConsoleWindow() == null) 10 else 11);
     } else if (std.mem.eql(u8, mode, "ctrlc-target")) {
@@ -162,6 +166,7 @@ fn die(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 extern "kernel32" fn GetModuleFileNameW(?*anyopaque, [*]u16, u32) callconv(.winapi) u32;
+extern "kernel32" fn GetACP() callconv(.winapi) u32;
 extern "kernel32" fn GetConsoleWindow() callconv(.winapi) ?w.HWND;
 extern "kernel32" fn SetConsoleCtrlHandler(?*const fn (u32) callconv(.winapi) i32, i32) callconv(.winapi) i32;
 extern "kernel32" fn GenerateConsoleCtrlEvent(u32, u32) callconv(.winapi) i32;

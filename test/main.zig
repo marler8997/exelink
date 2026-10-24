@@ -252,6 +252,20 @@ test "Ctrl+C reaches the target, and the link still exits with its exit code" {
     try testing.expectEqual(std.process.Child.Term{ .exited = 7 }, r.term);
 }
 
+test "the target's manifest applies, as when run directly" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // its manifest asks for the UTF-8 code page: first that Windows applies it
+    // run directly, then through a link
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, (try run(a, &.{ paths.probe, "acp" })).term);
+    const link = try probeLink(a, &tmp);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 0 }, (try run(a, &.{ link, "acp" })).term);
+}
+
 test "killing the link kills its target, and only it: not a process the target started" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
