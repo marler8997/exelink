@@ -32,6 +32,8 @@ pub fn build(b: *std.Build) void {
     for (arches, &templates, &exelinks) |arch, *template, *exelink_exe| {
         const target = windowsTarget(b, arch);
         template.* = addTemplate(b, target);
+        // so a package manager can make links without running exelink.exe
+        b.addNamedLazyPath(b.fmt("template-{t}", .{arch}), template.*);
         all.dependOn(&b.addInstallBinFile(template.*, b.fmt("{t}/template.exe", .{arch})).step);
 
         exelink_exe.* = addExelink(b, target, optimize, template.*, dev_version_file);
