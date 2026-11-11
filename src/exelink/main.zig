@@ -20,7 +20,7 @@ const usage = "exelink " ++ @embedFile("version") ++ "\n\n" ++
 /// The link template, template.exe, unpatched.
 const template = @embedFile("template_exe");
 
-/// Where the target's RVA and length (UTF-16 units) go, both u32: the DOS
+/// Where the target's RVA and length (bytes of WTF-8) go, both u32: the DOS
 /// header's reserved e_res2. Same value in src/template/main.zig.
 const target_info = 0x28;
 
@@ -62,7 +62,7 @@ pub fn main(init: std.process.Init) !void {
         const link = std.Io.Dir.cwd().readFileAlloc(io, positional[0], arena, .limited(64 * 1024 * 1024)) catch |e|
             fatal("read '{s}': {s}", .{ positional[0], @errorName(e) });
         const target = readTarget(link) orelse fatal("'{s}' is not an exelink", .{positional[0]});
-        writeStdout(io, "{f}\n", .{fmtWtf16(target)});
+        writeStdout(io, "{f}\n", .{target});
     } else {
         // "to" says which path is which, so they can't be swapped by mistake
         // "to" says which path is the link: say what's missing with the
@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
         // A link is the template plus its target, so changing a link's target
         // is creating it anew; no separate `set`.
         // What LINK was, for the message.
-        const Was = union(enum) { nothing, link: []align(1) const u16, file };
+        const Was = union(enum) { nothing, link: Target, file };
         var was: Was = .nothing;
         if (std.Io.Dir.cwd().readFileAlloc(io, link_path, arena, .limited(64 * 1024 * 1024))) |old| {
             // already this link: not rewritten, so it works while the link is
@@ -126,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
             fatal("write '{s}': {s}", .{ link_path, @errorName(e) });
         switch (was) {
             .nothing => std.debug.print("created {s} to {s}\n", .{ link_path, target }),
-            .link => |old| std.debug.print("updated {s} to {s} (was {f})\n", .{ link_path, target, fmtWtf16(old) }),
+            .link => |old| std.debug.print("updated {s} to {s} (was {f})\n", .{ link_path, target, old }),
             .file => std.debug.print("created {s} to {s} (replaced a file that isn't a link)\n", .{ link_path, target }),
         }
     }
@@ -184,46 +184,77 @@ const Pe = struct {
     }
 };
 
+/// the control characters
+const ctl = blk: {
+    var c: [32]u8 = undefined;
+    for (&c, 0..) |*x, i| x.* = i;
+    break :blk c;
+};
+
 const template_pe = Pe.parse(template) orelse unreachable;
 
-/// A copy of the template with `target` appended to its last section: an
-/// absolute one as an NT path, a relative one as given (the template tells
-/// them apart by the "\??\" prefix).
+/// A copy of the template with `target` appended to its last section, as
+/// WTF-8: an absolute one as an NT path, a relative one as given (the template
+/// tells them apart by the "\??\" prefix).
 fn create(arena: std.mem.Allocator, target: []const u8, relative: bool) ![]u8 {
-    const nt = try std.unicode.wtf8ToWtf16LeAlloc(arena, if (relative) target else try std.mem.concat(arena, u8, &.{ "\\??\\", target }));
-    for (nt) |*c| if (c.* == '/') {
-        c.* = '\\';
-    };
+    const nt = try std.mem.concat(arena, u8, &.{ if (relative) "" else "\\??\\", target });
+    std.mem.replaceScalar(u8, nt, '/', '\\');
+    // the template decodes it unchecked
+    const len16 = std.unicode.calcWtf16LeLen(nt) catch fatal("target '{s}' isn't valid WTF-8", .{target});
     // UNICODE_STRING lengths are u16 bytes, and the command line adds 2 quotes
-    if (nt.len * 2 > 0xfffe - 8) fatal("target path is too long", .{});
+    if (len16 * 2 > 0xfffe - 8) fatal("target path is too long", .{});
+
+    // +2: the line ends before and after it
+    if (nt.len + 2 > target_room) fatal("target path is too long", .{});
 
     const p = template_pe;
     const va = read32(template, p.last + 12);
-    const vsize = read32(template, p.last + 8);
+    const off = read32(template, p.last + 16);
     const raw_ptr = read32(template, p.last + 20);
-    // the path goes at the end of the last section, which must end the file
-    std.debug.assert(raw_ptr + read32(template, p.last + 16) == template.len);
-    const off = std.mem.alignForward(u32, vsize, 2);
-    const new_vsize: u32 = off + @as(u32, @intCast(nt.len * 2));
-    const new_raw = std.mem.alignForward(u32, new_vsize, p.file_align);
-
-    const out = try arena.alloc(u8, raw_ptr + new_raw);
-    @memset(out, 0);
-    @memcpy(out[0..template.len], template);
-    @memcpy(out[raw_ptr + off ..][0 .. nt.len * 2], std.mem.sliceAsBytes(nt));
-    write32(out, p.last + 8, new_vsize);
-    write32(out, p.last + 16, new_raw);
-    write32(out, p.size_of_image, std.mem.alignForward(u32, va + new_vsize, p.sect_align));
-    write32(out, target_info, va + off);
-    write32(out, target_info + 4, @intCast(nt.len));
+    // the path goes after the last section's data, which must end the file
+    if (raw_ptr + off != template.len) @panic("the template's last section doesn't end the file");
+    // The file ends with the path, on a line of its own, so it shows as the
+    // last line in a text editor and can be edited there. The section is
+    // declared `target_room` larger than the file holds, for a longer path:
+    // Windows maps what the file has, and zeroes after it.
+    const size = std.mem.alignForward(u32, off + target_room, p.file_align);
+    // That's with sections aligned below a page (x86, x86_64). Aligned to
+    // pages (aarch64), Windows refuses a file shorter than the section's raw
+    // size, so that ends where the path starts: Windows still maps the file
+    // up to the next multiple of the file alignment, so the line can grow to
+    // there (511 bytes), and is cut off past it. Measured on x86_64 linked
+    // like aarch64; not run on arm64.
+    const raw_size = if (p.sect_align < 4096) size else off + 1;
+    const out = try std.mem.concat(arena, u8, &.{ template, "\n", nt, "\n" });
+    write32(out, p.last + 8, size);
+    write32(out, p.last + 16, raw_size);
+    write32(out, p.size_of_image, std.mem.alignForward(u32, va + size, p.sect_align));
+    write32(out, target_info, va + off + 1);
     return out;
 }
+
+/// The most bytes a link's last line can grow to, line ends included.
+const target_room = 0x10000;
+
+/// A link's target as stored: WTF-8, or WTF-16 in links made by an exelink
+/// from before it stored WTF-8.
+const Target = union(enum) {
+    wtf8: []const u8,
+    wtf16: []align(1) const u16,
+
+    pub fn format(t: Target, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (t) {
+            .wtf8 => |s| try w.writeAll(s),
+            .wtf16 => |s| try writeWtf8(s, w),
+        }
+    }
+};
 
 /// The target as given to create (an absolute one without the "\??\"
 /// prefix, a relative one as stored), or null if `img` isn't a link. Checks
 /// only what finding the target relies on, not the template's code, so links
 /// from any version of exelink work.
-fn readTarget(img: []const u8) ?[]align(1) const u16 {
+fn readTarget(img: []const u8) ?Target {
     const p = Pe.parse(img) orelse return null;
     // u64: no overflow in the 32-bit exelink
     const va: u64 = read32(img, p.last + 12);
@@ -231,16 +262,24 @@ fn readTarget(img: []const u8) ?[]align(1) const u16 {
     const raw: u64 = read32(img, p.last + 16);
     const raw_ptr: u64 = read32(img, p.last + 20);
     const rva: u64 = read32(img, target_info);
-    const size = @as(u64, read32(img, target_info + 4)) * 2;
-    // the target ends the last section's data, where create puts it
-    if (size == 0 or rva < va or rva + size != va + vsize or vsize > raw or raw_ptr + raw > img.len) return null;
+    const len: u64 = read32(img, target_info + 4);
+    if (rva < va or rva >= va + vsize) return null;
     const off: usize = @intCast(raw_ptr + rva - va);
-    const t: []align(1) const u16 = std.mem.bytesAsSlice(u16, img[off..][0..@intCast(size)]);
-    return if (t.len > 4 and t[0] == '\\' and t[1] == '?') t[4..] else t;
-}
-
-fn fmtWtf16(wtf16: []align(1) const u16) std.fmt.Alt([]align(1) const u16, writeWtf8) {
-    return .{ .data = wtf16 };
+    if (len == 0) {
+        // the file's last line, as the template reads it: up to a control
+        // character or the end of the file
+        if (rva == 0 or off >= img.len) return null;
+        const rest = img[off..];
+        const t = rest[0 .. std.mem.indexOfAny(u8, rest, &ctl) orelse rest.len];
+        return .{ .wtf8 = if (std.mem.startsWith(u8, t, "\\??\\")) t[4..] else t };
+    }
+    // before that, UTF-16 ending the last section's data, with its length
+    if (vsize > raw or raw_ptr + raw > img.len) return null;
+    if (rva + len * 2 == va + vsize) {
+        const t: []align(1) const u16 = std.mem.bytesAsSlice(u16, img[off..][0..@intCast(len * 2)]);
+        return .{ .wtf16 = if (t.len > 4 and t[0] == '\\' and t[1] == '?') t[4..] else t };
+    }
+    return null;
 }
 
 /// WTF-16 as WTF-8: a valid path round-trips, even with unpaired surrogates.
