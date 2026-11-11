@@ -466,3 +466,23 @@ test "a command line too long for the target: the link says so, and exits with t
     try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ link, ": command line too long for '", target, "': 0xC0000106\n" }), r.stderr);
     try testing.expectEqual(std.process.Child.Term{ .exited = 0x06 }, r.term);
 }
+
+test "a target with an unpaired surrogate in its name, which UTF-8 can't spell" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // U+D800 as WTF-8
+    const name = "t\xED\xA0\x80.exe";
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, name, io, .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const target = try std.fs.path.join(a, &.{ dir, name });
+    const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", target })).term.success());
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ target, "\n" }), (try run(a, &.{ paths.exelink, "--print", link })).stdout);
+    const r = try run(a, &.{link});
+    try testing.expectEqualStrings("", r.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
+}

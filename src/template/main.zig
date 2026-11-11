@@ -15,7 +15,7 @@
 //! it builds the process parameters and the console reference we built.
 //!
 //! This file builds the link template. `exelink` copies it, appends the
-//! target's NT path ("\??\C:\...", UTF-16) to the end of its last section
+//! target's NT path ("\??\C:\...", WTF-8) to the end of its last section
 //! (growing the section, so the path is mapped with the image), and writes
 //! its RVA and length into the DOS header's reserved bytes (`DosHeader`): a
 //! fixed offset, so no magic value to search for and no record in the image
@@ -42,10 +42,9 @@ const max_command_line_len = 32767;
 /// (offset 0x28, same in src/exelink/main.zig).
 const DosHeader = extern struct {
     _: [0x28]u8,
-    /// RVA of the target's path (UTF-16LE)
+    /// RVA of the target's path (WTF-8, the file's last line); 0 in an
+    /// unpatched template
     target_rva: u32,
-    /// in UTF-16 code units; 0 in an unpatched template
-    target_len: u32,
 };
 
 /// JOBOBJECT_EXTENDED_LIMIT_INFORMATION
@@ -96,6 +95,37 @@ fn copy(dst: [*]u16, src: []const u16) [*]u16 {
             return dst + src.len;
         },
     }
+}
+
+/// The target's path as stored, WTF-8, to WTF-16 on the heap. Not
+/// RtlUTF8ToUnicodeN: it has no unpaired surrogates (WTF-8's point), and
+/// they'd become U+FFFD, another path. Trusts `exelink` to have written
+/// well-formed WTF-8: nothing is validated.
+/// It ends at the first control character: a line end (LF or CR, as an
+/// editor leaves it), or the 0 that Windows maps past the end of the file.
+fn decode(src: [*]const u8) []const u16 {
+    var len: usize = 0;
+    while (src[len] >= ' ') len += 1;
+    // a UTF-16 unit takes at least one byte of WTF-8
+    const buf = alloc(len);
+    var o: usize = 0;
+    var c: u32 = 0;
+    for (src[0..len], 0..) |b, i| {
+        // ASCII or a lead byte (110xxxxx, 1110xxxx, 11110xxx) starts a code
+        // point, a continuation byte (10xxxxxx) adds 6 bits
+        c = if (b & 0xC0 == 0x80) c << 6 | (b & 0x3F) else if (b < 0xC0) b else b & @as(u8, if (b < 0xE0) 0x1F else 0x0F);
+        // the byte that ends the path isn't a continuation byte
+        if (src[i + 1] & 0xC0 == 0x80) continue;
+        if (c >= 0x10000) {
+            c -= 0x10000;
+            buf[o] = @intCast(0xD800 | c >> 10);
+            o += 1;
+            c = 0xDC00 | (c & 0x3FF);
+        }
+        buf[o] = @truncate(c);
+        o += 1;
+    }
+    return buf[0..o];
 }
 
 /// Zeroes `p.*`. Not std.mem.zeroes: for a large struct it calls memset,
@@ -237,8 +267,8 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     const dos: *const DosHeader = @ptrCast(@alignCast(peb.ImageBaseAddress));
     // Only `exelink`'s copies are links, so this is the template run
     // directly: a mistake, not an input to handle.
-    if (dos.target_len == 0) @trap();
-    var target: []const u16 = @as([*]const u16, @ptrCast(@alignCast(@as([*]const u8, @ptrCast(dos)) + dos.target_rva)))[0..dos.target_len];
+    if (dos.target_rva == 0) @trap();
+    var target = decode(@as([*]const u8, @ptrCast(dos)) + dos.target_rva);
     // an absolute target is stored as an NT path, a relative one as given
     if (target[0] != '\\') target = resolveRelative(target);
     const target_dos = target[4..]; // for messages: without "\??\"
