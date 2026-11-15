@@ -117,7 +117,7 @@ fn zero(p: anytype) void {
 /// What's lost: a target can't see the link's name, which only matters to
 /// multi-call programs that dispatch on it (busybox-style).
 /// Measured: +240 bytes, no measurable launch time (within 0.08 ms of 10 ms).
-fn commandLine(cmd_us: UNICODE_STRING, target: []const u16) [*:0]u16 {
+fn commandLine(cmd_us: UNICODE_STRING, dos: []const u16) [*:0]u16 {
     const cmd = cmd_us.Buffer.?[0 .. cmd_us.Length / 2];
     // argv[0] has no escapes: quotes toggle, and unquoted whitespace ends it
     var i: usize = 0;
@@ -126,7 +126,6 @@ fn commandLine(cmd_us: UNICODE_STRING, target: []const u16) [*:0]u16 {
         quoted = quoted != (cmd[i] == '"');
         if (!quoted and (cmd[i] == ' ' or cmd[i] == '\t')) break;
     }
-    const dos = target[4..]; // without "\??\"
     const len = dos.len + 2 + cmd.len - i;
     if (len + 1 > max_command_line_len) fail(lenPrefixed("command line too long for"), dos, 0xC0000106); // STATUS_NAME_TOO_LONG
     const buf = alloc(len + 1);
@@ -198,9 +197,14 @@ fn writeWide(w: []const u16) void {
 fn linkPath() []const u16 {
     const image = windows.peb().ProcessParameters.ImagePathName;
     const link_path = image.Buffer.?[0 .. image.Length / 2];
-    // Started by another link with a long path: "\\?\C:\...". No length
-    // check: it's at least "C:\x".
-    return if (link_path[2] == '?') link_path[4..] else link_path;
+    // Started by another link with a long path: "\\?\C:\..." or
+    // "\\?\UNC\server\...". No length check: it's at least "C:\x".
+    if (link_path[2] != '?') return link_path;
+    if (link_path[5] == ':') return link_path[4..];
+    // "\\?\UNC\server" -> "\\server", in our own copy of the parameters:
+    // the same each call
+    link_path[6] = '\\';
+    return link_path[6..];
 }
 
 /// Never freed: the process only lives until the target exits.
@@ -208,8 +212,11 @@ fn alloc(n: usize) [*]u16 {
     return @ptrCast(@alignCast(RtlAllocateHeap.get()(windows.peb().ProcessHeap, 0, n * 2) orelse fail(lenPrefixed("out of memory"), &.{}, 0xC0000017))); // STATUS_NO_MEMORY
 }
 
-/// A relative target's NT path: resolved against this link's directory each
-/// run, so a link and its target can move together.
+/// A relative target's full DOS path: resolved against this link's directory
+/// each run, so a link and its target can move together. RtlGetFullPathName_U
+/// also collapses "..". Not RtlDosPathNameToNtPathName_U, which refuses a path
+/// past MAX_PATH in a process that isn't long-path aware: a link to a
+/// relative target there was made, then couldn't run.
 fn resolveRelative(rel: []const u16) []const u16 {
     const link_path = linkPath();
     var dir = link_path.len;
@@ -217,11 +224,11 @@ fn resolveRelative(rel: []const u16) []const u16 {
     const len = dir + rel.len;
     const buf = alloc(len + 1);
     copy(copy(buf, link_path[0..dir]), rel)[0] = 0;
-    var nt: UNICODE_STRING = undefined;
-    // also collapses the ".." that the NT path wouldn't
-    const status = RtlDosPathNameToNtPathName_U_WithStatus.get()(buf, &nt, null, null);
-    if (status < 0) fail(lenPrefixed("can't resolve"), buf[0..len], @bitCast(status));
-    return nt.Buffer.?[0 .. nt.Length / 2];
+    // no longer than buf: the link's directory is already full
+    const full = alloc(len + 1);
+    const size = RtlGetFullPathName_U.get()(buf, @intCast((len + 1) * 2), full, null);
+    if (size == 0 or size >= (len + 1) * 2) fail(lenPrefixed("can't resolve"), buf[0..len], 0xC0000106); // STATUS_NAME_TOO_LONG
+    return full[0 .. size / 2];
 }
 
 /// preserve_none on x86_64: it never returns, so saving the caller's registers
@@ -238,18 +245,21 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     // Only `exelink`'s copies are links, so this is the template run
     // directly: a mistake, not an input to handle.
     if (dos.target_len == 0) @trap();
-    var target: []const u16 = @as([*]const u16, @ptrCast(@alignCast(@as([*]const u8, @ptrCast(dos)) + dos.target_rva)))[0..dos.target_len];
+    const stored: []const u16 = @as([*]const u16, @ptrCast(@alignCast(@as([*]const u8, @ptrCast(dos)) + dos.target_rva)))[0..dos.target_len];
     // an absolute target is stored as an NT path, a relative one as given
-    if (target[0] != '\\') target = resolveRelative(target);
-    const target_dos = target[4..]; // for messages: without "\??\"
+    const target_dos = if (stored[0] == '\\') stored[4..] else resolveRelative(stored);
 
-    // A DOS path, 0-terminated. The target sees it as its own path
-    // (GetModuleFileNameW), so "\\?\" only past MAX_PATH, where we need it.
-    const app = if (target_dos.len < 260) target_dos else target;
-    const image = alloc(app.len + 1);
-    copy(image, app)[0] = 0;
-    if (app.len != target_dos.len) image[1] = '\\'; // "\??\" -> "\\?\"
-    const cmdline = commandLine(link_params.CommandLine, target);
+    // 0-terminated. The target sees it as its own path (GetModuleFileNameW),
+    // so "\\?\" only past MAX_PATH, where we need it: "\\?\UNC" over a UNC
+    // path's first backslash (6 more units), and the 0.
+    const image = alloc(target_dos.len + 7);
+    if (target_dos.len < 260)
+        copy(image, target_dos)[0] = 0
+    else if (target_dos[0] == '\\')
+        copy(copy(image, std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC")), target_dos[1..])[0] = 0
+    else
+        copy(copy(image, std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\")), target_dos)[0] = 0;
+    const cmdline = commandLine(link_params.CommandLine, target_dos);
 
     // The target is killed if we are (a timeout, a stop button, taskkill): in
     // a job closed when we exit, however we exit. Silent breakaway: only the
@@ -275,7 +285,7 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
     // otherwise gets one, so the child is too, instead of opening a console
     // window. Inherits handles and gets our std handles, as from cmd.
     const flags: u32 = 0x4 | @as(u32, if (@intFromPtr(link_params.ConsoleHandle) == 0) 0x8 else 0); // CREATE_SUSPENDED, DETACHED_PROCESS
-    if (CreateProcessW.get()(image[0..app.len :0], cmdline, null, null, 1, flags, null, null, &si, &child) == 0) {
+    if (CreateProcessW.get()(@ptrCast(image), cmdline, null, null, 1, flags, null, null, &si, &child) == 0) {
         const err: u32 = @backingInt(windows.teb().LastErrorValue);
         fail(switch (err) {
             // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND: the most common
@@ -345,7 +355,7 @@ const NtResumeThread = ntdll("NtResumeThread", fn (?*anyopaque, ?*u32) callconv(
 const NtWaitForSingleObject = ntdll("NtWaitForSingleObject", fn (?*anyopaque, u8, ?*anyopaque) callconv(.winapi) i32);
 const NtQueryInformationProcess = ntdll("NtQueryInformationProcess", fn (?*anyopaque, u32, *anyopaque, u32, ?*u32) callconv(.winapi) i32);
 const RtlAllocateHeap = ntdll("RtlAllocateHeap", fn (?*anyopaque, u32, usize) callconv(.winapi) ?*anyopaque);
-const RtlDosPathNameToNtPathName_U_WithStatus = ntdll("RtlDosPathNameToNtPathName_U_WithStatus", fn ([*]const u16, *UNICODE_STRING, ?*anyopaque, ?*anyopaque) callconv(.winapi) i32);
+const RtlGetFullPathName_U = ntdll("RtlGetFullPathName_U", fn ([*]const u16, u32, [*]u16, ?*anyopaque) callconv(.winapi) u32);
 const NtWriteFile = ntdll("NtWriteFile", fn (?*anyopaque, ?*anyopaque, ?*anyopaque, ?*anyopaque, *[2]usize, *const anyopaque, u32, ?*i64, ?*u32) callconv(.winapi) i32);
 const RtlUnicodeToUTF8N = ntdll("RtlUnicodeToUTF8N", fn ([*]u8, u32, *u32, [*]const u16, u32) callconv(.winapi) i32);
 const RtlExitUserProcess = ntdll("RtlExitUserProcess", fn (u32) callconv(.winapi) noreturn);

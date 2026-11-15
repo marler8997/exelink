@@ -423,6 +423,50 @@ test "a relative target resolves against the link's directory, and moves with it
     }
 }
 
+test "a relative target that resolves past MAX_PATH" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // two components: one can't exceed 255
+    const deep = &@as([150]u8, @splat('d')) ++ "\\" ++ &@as([150]u8, @splat('d'));
+    try tmp.dir.createDirPath(io, deep);
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, deep ++ "\\echo.exe", io, .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
+    try testing.expect((try run(a, &.{ paths.exelink, link, "to", deep ++ "\\echo.exe" })).term.success());
+    const r = try run(a, &.{link});
+    try testing.expectEqualStrings("", r.stderr);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
+}
+
+test "a link on a UNC path, to a link past MAX_PATH: each resolves its relative target" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // two components: one can't exceed 255
+    const deep = &@as([150]u8, @splat('d')) ++ "\\" ++ &@as([150]u8, @splat('d'));
+    try tmp.dir.createDirPath(io, deep);
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, deep ++ "\\echo.exe", io, .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const inner = try std.fs.path.join(a, &.{ dir, deep, "b.exe" });
+    try testing.expect((try run(a, &.{ paths.exelink, inner, "to", "echo.exe" })).term.success());
+    const outer = try std.fs.path.join(a, &.{ dir, "a.exe" });
+    try testing.expect((try run(a, &.{ paths.exelink, outer, "to", deep ++ "\\b.exe" })).term.success());
+    // the same directory through the drive's admin share: the outer link
+    // starts the inner one as "\\?\UNC\localhost\..."
+    const unc = try std.mem.concat(a, u8, &.{ "\\\\localhost\\", dir[0..1], "$", dir[2..] });
+    const r = try run(a, &.{try std.fs.path.join(a, &.{ unc, "a.exe" })});
+    try testing.expectEqualStrings("", r.stderr);
+    try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "\"", unc, "\\", deep, "\\echo.exe\"\n" }), r.stdout);
+    try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
+}
+
 test "a target that isn't an exe: the link says it can't start it, and exits with the error" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();

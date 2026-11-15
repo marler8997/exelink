@@ -270,7 +270,7 @@ const imports = [_]struct { []const u8, []const u8, u32 }{
     .{ "ntdll", "NtWaitForSingleObject", 3 },
     .{ "ntdll", "NtQueryInformationProcess", 5 },
     .{ "ntdll", "RtlAllocateHeap", 3 },
-    .{ "ntdll", "RtlDosPathNameToNtPathName_U_WithStatus", 4 },
+    .{ "ntdll", "RtlGetFullPathName_U", 4 },
     .{ "ntdll", "NtWriteFile", 9 },
     .{ "ntdll", "RtlUnicodeToUTF8N", 5 },
     .{ "ntdll", "RtlExitUserProcess", 1 },
