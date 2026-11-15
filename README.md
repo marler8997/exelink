@@ -87,9 +87,9 @@ A link is the template plus its target's path (UTF-16):
 
 | arch    | template |
 |---------|----------|
-| x86_64  | 2,896 bytes |
+| x86_64  | 2,976 bytes |
 | aarch64 | 3,584 bytes |
-| x86     | 2,432 bytes |
+| x86     | 2,560 bytes |
 
 ## Errors
 
