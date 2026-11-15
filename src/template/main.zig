@@ -193,18 +193,10 @@ fn writeWide(w: []const u16) void {
     }
 }
 
-/// This link's path, as a DOS path.
+/// This link's path, as it was run: what fail() names. Never written to.
 fn linkPath() []const u16 {
     const image = windows.peb().ProcessParameters.ImagePathName;
-    const link_path = image.Buffer.?[0 .. image.Length / 2];
-    // Started by another link with a long path: "\\?\C:\..." or
-    // "\\?\UNC\server\...". No length check: it's at least "C:\x".
-    if (link_path[2] != '?') return link_path;
-    if (link_path[5] == ':') return link_path[4..];
-    // "\\?\UNC\server" -> "\\server", in our own copy of the parameters:
-    // the same each call
-    link_path[6] = '\\';
-    return link_path[6..];
+    return image.Buffer.?[0 .. image.Length / 2];
 }
 
 /// Never freed: the process only lives until the target exits.
@@ -212,22 +204,49 @@ fn alloc(n: usize) [*]u16 {
     return @ptrCast(@alignCast(RtlAllocateHeap.get()(windows.peb().ProcessHeap, 0, n * 2) orelse fail(lenPrefixed("out of memory"), &.{}, 0xC0000017))); // STATUS_NO_MEMORY
 }
 
-/// A relative target's full DOS path: resolved against this link's directory
+/// A relative target's full path: resolved against this link's directory
 /// each run, so a link and its target can move together. RtlGetFullPathName_U
 /// also collapses "..". Not RtlDosPathNameToNtPathName_U, which refuses a path
 /// past MAX_PATH in a process that isn't long-path aware: a link to a
 /// relative target there was made, then couldn't run.
+///
+/// A link started by a device path ("\\?\..." or "\\.\...") keeps it, but in
+/// a form that resolves and runs past MAX_PATH, made in our copy:
+/// - a drive's or a UNC path's ("\\?\C:\", "\\?\UNC\server\": how a link
+///   starts another past MAX_PATH): as that DOS path, so the target sees a
+///   DOS path, and start() prefixes it again only past MAX_PATH.
+/// - any other (a volume GUID's, GLOBALROOT, a DOS device's): as "\\?\" for
+///   "\\.\", the same file but not limited to MAX_PATH. start() runs it as is.
 fn resolveRelative(rel: []const u16) []const u16 {
-    const link_path = linkPath();
-    var dir = link_path.len;
-    while (dir > 0 and link_path[dir - 1] != '\\') dir -= 1;
-    const len = dir + rel.len;
-    const buf = alloc(len + 1);
-    copy(copy(buf, link_path[0..dir]), rel)[0] = 0;
-    // no longer than buf: the link's directory is already full
-    const full = alloc(len + 1);
-    const size = RtlGetFullPathName_U.get()(buf, @intCast((len + 1) * 2), full, null);
-    if (size == 0 or size >= (len + 1) * 2) fail(lenPrefixed("can't resolve"), buf[0..len], 0xC0000106); // STATUS_NAME_TOO_LONG
+    const p = linkPath();
+    var dir = p.len;
+    while (dir > 0 and p[dir - 1] != '\\') dir -= 1;
+    const buf = alloc(dir + rel.len + 1);
+    copy(copy(buf, p[0..dir]), rel)[0] = 0;
+    var path = buf[0 .. dir + rel.len];
+    // Decided on the link's path, not the copy, where the target follows the
+    // directory. Through the pointer, past the slice: a path is at least
+    // "C:\x", and a shorter device path (one that is the exe, "\\.\XL") ends
+    // in a 0, where the checks stop.
+    const c = p.ptr;
+    if ((c[2] == '?' or c[2] == '.') and c[3] == '\\') {
+        if (c[5] == ':') {
+            path = path[4..]; // "\\?\C:\"
+        } else if (c[4] | 0x20 == 'u' and c[5] | 0x20 == 'n' and c[6] | 0x20 == 'c' and c[7] == '\\') {
+            buf[6] = '\\'; // "\\?\UNC\server" -> "\\server"
+            path = path[6..];
+        } else buf[2] = '?';
+    }
+    // Not exact for a directory only "\\?\" reaches, whose name ends in a
+    // dot: resolving drops it, so "dot.\t.exe" is "dot\t.exe".
+    // The link's directory is already full, so resolving only shortens the
+    // path, except a DOS device name: "\\.\" over a root of at least 3, so
+    // one more unit ("Q:\nul" is "\\.\nul"), and the 0. The only failure
+    // left is a path too long for it (32767 units or more), which returns 0.
+    const cap = (path.len + 2) * 2;
+    const full = alloc(path.len + 2);
+    const size = RtlGetFullPathName_U.get()(path.ptr, @intCast(cap), full, null);
+    if (size == 0 or size >= cap) fail(lenPrefixed("can't resolve"), path, 0xC0000106); // STATUS_NAME_TOO_LONG
     return full[0 .. size / 2];
 }
 
@@ -251,9 +270,11 @@ export fn start() callconv(switch (@import("builtin").cpu.arch) {
 
     // 0-terminated. The target sees it as its own path (GetModuleFileNameW),
     // so "\\?\" only past MAX_PATH, where we need it: "\\?\UNC" over a UNC
-    // path's first backslash (6 more units), and the 0.
+    // path's first backslash (6 more units), and the 0. A device path (see
+    // linkPath()) as is: "\\?\" isn't limited to MAX_PATH, and the "\\.\" of
+    // a relative target resolved to a DOS device ("\\.\nul") is short.
     const image = alloc(target_dos.len + 7);
-    if (target_dos.len < 260)
+    if (target_dos.len < 260 or target_dos[2] == '?')
         copy(image, target_dos)[0] = 0
     else if (target_dos[0] == '\\')
         copy(copy(image, std.unicode.utf8ToUtf16LeStringLiteral("\\\\?\\UNC")), target_dos[1..])[0] = 0

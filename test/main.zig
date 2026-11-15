@@ -467,6 +467,128 @@ test "a link on a UNC path, to a link past MAX_PATH: each resolves its relative 
     try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
 }
 
+test "a relative target runs as \"\\\\?\\\" from MAX_PATH on, and only from there" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
+    const d255 = &@as([255]u8, @splat('d'));
+    for ([_]usize{ 259, 260 }) |n| {
+        // DIR\SUB\probe.exe, n units long
+        const fixed = dir.len + "\\\\probe.exe".len;
+        const sub_len = if (n > fixed) n - fixed else 0;
+        if (sub_len == 0 or sub_len > d255.len) {
+            std.debug.print("tmp dir '{s}' can't make a {d}-unit path in one component\n", .{ dir, n });
+            return error.TestUnexpectedResult;
+        }
+        const rel = try std.mem.concat(a, u8, &.{ d255[0..sub_len], "\\probe.exe" });
+        try tmp.dir.createDirPath(io, d255[0..sub_len]);
+        try std.Io.Dir.cwd().copyFile(paths.probe, tmp.dir, rel, io, .{});
+        const target = try std.fs.path.join(a, &.{ dir, rel });
+        try testing.expectEqual(n, target.len);
+        try testing.expect((try run(a, &.{ paths.exelink, link, "to", rel })).term.success());
+        const r = try run(a, &.{ link, "self" });
+        try testing.expectEqualStrings("", r.stderr);
+        try testing.expectEqualStrings(if (n < 260) target else try std.mem.concat(a, u8, &.{ "\\\\?\\", target }), r.stdout);
+    }
+}
+
+test "a relative target's \"..\" collapses, past MAX_PATH too" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // two components: one can't exceed 255
+    const deep = &@as([150]u8, @splat('d')) ++ "\\" ++ &@as([150]u8, @splat('d'));
+    // past MAX_PATH by itself, whatever the tmp dir
+    const x = &@as([200]u8, @splat('x'));
+    const up = x ++ "\\..\\" ++ x ++ "\\..\\";
+    try tmp.dir.createDirPath(io, deep);
+    try tmp.dir.createDirPath(io, x);
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, "echo.exe", io, .{});
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, deep ++ "\\echo.exe", io, .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
+    // past MAX_PATH as given, then short, or still long
+    for ([_][]const u8{ "echo.exe", deep ++ "\\echo.exe" }) |rest| {
+        try testing.expect((try run(a, &.{ paths.exelink, link, "to", try std.mem.concat(a, u8, &.{ up, rest }) })).term.success());
+        const r = try run(a, &.{link});
+        try testing.expectEqualStrings("", r.stderr);
+        try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "\"", dir, "\\", rest, "\"\n" }), r.stdout);
+        try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
+    }
+}
+
+extern "kernel32" fn DefineDosDeviceW(flags: u32, name: [*:0]const u16, target: ?[*:0]const u16) callconv(.winapi) i32;
+extern "kernel32" fn GetVolumeNameForVolumeMountPointW(mount_point: [*:0]const u16, name: [*]u16, len: u32) callconv(.winapi) i32;
+
+test "a link started by a device path: a drive's or UNC's resolves as a DOS path, any other as \"\\\\?\\\", and the link names itself as run" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // two components: one can't exceed 255
+    const deep = &@as([150]u8, @splat('d')) ++ "\\" ++ &@as([150]u8, @splat('d'));
+    try tmp.dir.createDirPath(io, deep);
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, "echo.exe", io, .{});
+    try std.Io.Dir.cwd().copyFile(paths.echo, tmp.dir, deep ++ "\\echo.exe", io, .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const link = try std.fs.path.join(a, &.{ dir, "l.exe" });
+    // A DOS device for the tmp dir, in this logon session, named like "UNC"
+    // so it isn't taken for one. One per arch: the arches' tests run at once.
+    const dir_w = try std.unicode.wtf8ToWtf16LeAllocZ(a, dir);
+    const device_name = switch (@import("builtin").cpu.arch) {
+        .x86_64 => "UNQ",
+        .x86 => "UNR",
+        else => "UNS",
+    };
+    const device = std.unicode.utf8ToUtf16LeStringLiteral(device_name);
+    try testing.expect(DefineDosDeviceW(0, device, dir_w) != 0);
+    defer _ = DefineDosDeviceW(2 | 4, device, dir_w); // DDD_REMOVE_DEFINITION, DDD_EXACT_MATCH_ON_REMOVE
+    // the tmp dir's volume, "\\?\Volume{...}\"
+    var volume_w: [64]u16 = undefined;
+    try testing.expect(GetVolumeNameForVolumeMountPointW(try std.unicode.wtf8ToWtf16LeAllocZ(a, dir[0..3]), &volume_w, volume_w.len) != 0);
+    const volume = try std.unicode.wtf16LeToWtf8Alloc(a, std.mem.sliceTo(&volume_w, 0));
+    const unc = try std.mem.concat(a, u8, &.{ "\\\\localhost\\", dir[0..1], "$", dir[2..] });
+    const globalroot = try std.mem.concat(a, u8, &.{ "\\\\?\\GLOBALROOT\\??\\", dir });
+    const by_volume = try std.mem.concat(a, u8, &.{ volume, dir[3..] });
+    // the directory as the link is started from, and as its target sees it
+    const forms = [_][2][]const u8{
+        .{ try std.mem.concat(a, u8, &.{ "\\\\?\\", dir }), dir },
+        .{ try std.mem.concat(a, u8, &.{ "\\\\.\\", dir }), dir },
+        .{ try std.mem.concat(a, u8, &.{ "\\\\?\\UNC", unc[1..] }), unc },
+        .{ try std.mem.concat(a, u8, &.{ "\\\\.\\UNC", unc[1..] }), unc },
+        .{ globalroot, globalroot },
+        .{ by_volume, by_volume },
+        .{ "\\\\.\\" ++ device_name, "\\\\?\\" ++ device_name },
+    };
+    // short, past MAX_PATH, and missing: the link names itself as it was run
+    for ([_][]const u8{ "echo.exe", deep ++ "\\echo.exe", "missing.exe" }) |rel| {
+        try testing.expect((try run(a, &.{ paths.exelink, "--unchecked", link, "to", rel })).term.success());
+        for (forms) |form| {
+            const run_as = try std.mem.concat(a, u8, &.{ form[0], "\\l.exe" });
+            const target = try std.mem.concat(a, u8, &.{ form[1], "\\", rel });
+            const r = try run(a, &.{run_as});
+            if (std.mem.eql(u8, rel, "missing.exe")) {
+                try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ run_as, ": can't find '", target, "': 0x80070002\n" }), r.stderr);
+                try testing.expectEqual(std.process.Child.Term{ .exited = 0x02 }, r.term); // ERROR_FILE_NOT_FOUND
+            } else {
+                try testing.expectEqualStrings("", r.stderr);
+                try testing.expectEqualStrings(try std.mem.concat(a, u8, &.{ "\"", target, "\"\n" }), r.stdout);
+                try testing.expectEqual(std.process.Child.Term{ .exited = 42 }, r.term);
+            }
+        }
+    }
+}
+
 test "a target that isn't an exe: the link says it can't start it, and exits with the error" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
